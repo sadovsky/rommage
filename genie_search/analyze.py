@@ -29,9 +29,16 @@ from pathlib import Path
 import numpy as np
 
 with contextlib.redirect_stderr(io.StringIO()):
-    from rommage import INPUT_SEQUENCES
     from genie import GenieCode
     from scorer import _dhash_frame, _quantize, hamming
+
+
+def _get_input_sequences():
+    # Imported lazily to avoid a circular import: rommage imports analyze
+    # (for post-search clustering), so analyze can't import from rommage at
+    # module top.
+    from rommage import INPUT_SEQUENCES
+    return INPUT_SEQUENCES
 
 
 HIST_BIN = 0.005   # histogram-mean bin width
@@ -166,7 +173,7 @@ def analyze(
 
     boot_map: dict[str, bool] = {}
     if rom_path and warmup_frames > 0:
-        warmup_seq = INPUT_SEQUENCES[warmup_seq_name](warmup_frames)
+        warmup_seq = _get_input_sequences()[warmup_seq_name](warmup_frames)
         print(f"checking boot-safety for {len(reps)} cluster reps "
               f"(warmup: {warmup_seq_name}, {warmup_frames} frames)...")
         boot_map = check_boot_safety(rom_path, warmup_seq, reps)
@@ -358,7 +365,7 @@ if __name__ == "__main__":
     ap.add_argument("--warmup-frames", type=int, default=0,
                     help="warmup frame count to replay for boot-safety check")
     ap.add_argument("--warmup-input-sequence", default="walk_right",
-                    choices=list(INPUT_SEQUENCES.keys()))
+                    choices=list(_get_input_sequences().keys()))
     args = ap.parse_args()
     analyze(
         args.results_dir,
