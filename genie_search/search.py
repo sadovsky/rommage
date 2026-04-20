@@ -44,6 +44,23 @@ def _frame_hist(frame: np.ndarray, bins: int = 64) -> np.ndarray:
     return h / (h.sum() + 1e-12)
 
 
+def format_eta(seconds: float) -> str:
+    """Format a duration as a compact 'Xd Yh Zm Ws' string, skipping zero
+    components. Used for progress output."""
+    if seconds is None or seconds < 1:
+        return "0s"
+    s = int(seconds)
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    parts = []
+    if d: parts.append(f"{d}d")
+    if h: parts.append(f"{h}h")
+    if m: parts.append(f"{m}m")
+    if s: parts.append(f"{s}s")
+    return " ".join(parts) or "0s"
+
+
 def _truncate_sequence(
     seq: Sequence[tuple[int, int]], max_frames: int
 ) -> list[tuple[int, int]]:
@@ -637,7 +654,7 @@ def run_search(
             def trace_progress(done, total_addrs, stats):
                 pct = 100 * done / total_addrs
                 print(f"  trace: {done:,}/{total_addrs:,} ({pct:.1f}%) "
-                      f"@ {stats['rate']:.1f}/s  eta {stats['eta_s']:.0f}s  "
+                      f"@ {stats['rate']:.1f}/s  eta {format_eta(stats['eta_s'])}  "
                       f"live={stats['n_live']}", flush=True)
             live = trace_live_addresses(cfg, progress_callback=trace_progress)
             if cfg.trace_cache_path:

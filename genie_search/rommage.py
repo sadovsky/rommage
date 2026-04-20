@@ -27,7 +27,7 @@ with contextlib.redirect_stderr(io.StringIO()):
         idle, press_start, walk_right, random_mash,
         NOOP, A, B, SELECT, START, UP, DOWN, LEFT, RIGHT,
     )
-    from search import SearchConfig, run_search, rank_interesting, save_results
+    from search import SearchConfig, run_search, rank_interesting, save_results, format_eta
     from report import write_report
     from scorer import precompute_baseline
 
@@ -114,8 +114,7 @@ def cmd_search(args):
     def progress(done: int, total: int, stats: dict):
         pct = 100 * done / total
         rate = stats.get("rate", 0.0)
-        eta_s = stats.get("eta_s", 0.0)
-        eta_str = f"{eta_s/60:.1f}m" if eta_s >= 60 else f"{eta_s:.0f}s"
+        eta_str = format_eta(stats.get("eta_s", 0.0))
         n_s1 = stats.get("n_passed_s1", 0)
         n_bad = stats.get("n_boot_unsafe", 0)
         msg = (f"  progress: {done:,}/{total:,} ({pct:.1f}%) "
