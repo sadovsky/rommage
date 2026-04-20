@@ -408,25 +408,29 @@ def _run_procs_with_watchdog(
     task_list = list(tasks)
     n_expected = len(task_list)
 
-    workers: list = []
-    for _ in range(n_workers):
+    def _spawn():
         p = ctx.Process(
             target=_worker_loop,
             args=(setup_fn, setup_args, work_fn, task_q, result_q),
             daemon=True,
         )
         p.start()
-        workers.append(p)
+        return p
+
+    workers: list = [_spawn() for _ in range(n_workers)]
 
     for t in task_list:
         task_q.put(t)
-    # One sentinel per worker so clean-exit path returns naturally.
-    for _ in workers:
+    # One sentinel per worker so clean-exit path returns naturally. We add
+    # extra sentinels lazily below whenever we respawn a crashed worker.
+    for _ in range(n_workers):
         task_q.put(None)
 
     n_got = 0
+    n_crashes = 0
     timed_out = False
     last_progress = time.perf_counter()
+    MAX_RESPAWNS = max(1000, n_expected // 4)
 
     while n_got < n_expected:
         try:
@@ -443,11 +447,45 @@ def _run_procs_with_watchdog(
                     except Exception:
                         pass
                 break
-            # All workers dead with results pending = we lost some to crashes
-            # the error marker didn't cover (e.g. segfault). Bail cleanly.
+
+            # Replace any crashed workers. Native SIGSEGV inside the emulator
+            # (e.g. a byte-patched program dereferences null) kills the worker
+            # without the try/except in _worker_loop firing, so we never see
+            # an "__error__" marker. Respawn and write off the in-flight task.
+            any_change = False
+            for i, w in enumerate(workers):
+                if w.is_alive():
+                    continue
+                ec = w.exitcode
+                if ec == 0:
+                    # Clean sentinel exit. Nothing to do.
+                    continue
+                n_crashes += 1
+                n_expected -= 1  # the task it was processing is lost
+                try:
+                    w.close()
+                except Exception:
+                    pass
+                if n_crashes <= MAX_RESPAWNS:
+                    workers[i] = _spawn()
+                    task_q.put(None)  # keep sentinel count in sync
+                    any_change = True
+            if any_change:
+                last_progress = time.perf_counter()
+                continue
+
+            if n_crashes > MAX_RESPAWNS:
+                print(f"  {label}: exceeded respawn cap ({MAX_RESPAWNS}); "
+                      f"bailing with {n_got} results, {n_crashes} crashes",
+                      flush=True)
+                timed_out = True
+                break
+
+            # All workers cleanly exited AND queue is drained of results.
             if all(not w.is_alive() for w in workers):
                 print(f"  {label}: all workers exited; collected "
-                      f"{n_got}/{n_expected} results", flush=True)
+                      f"{n_got}/{n_expected} results "
+                      f"({n_crashes} native crashes respawned)", flush=True)
                 break
             continue
         last_progress = time.perf_counter()
