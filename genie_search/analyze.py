@@ -155,11 +155,12 @@ def analyze(
     for r in survivors:
         clusters[cluster_key(r)].append(r)
 
-    # One representative per cluster: highest-scoring, ties broken by code_str
-    reps: list[tuple[dict, int]] = []
+    # One representative per cluster (highest-scoring), plus the tail so the
+    # UI can list sibling codes under each card.
+    reps: list[tuple[dict, list[dict]]] = []
     for members in clusters.values():
         members.sort(key=lambda r: (-score_of(r), r["code_str"]))
-        reps.append((members[0], len(members)))
+        reps.append((members[0], members[1:]))
 
     reps.sort(key=lambda t: -score_of(t[0]))
     rep_scores = np.array([score_of(rep) for rep, _ in reps])
@@ -191,7 +192,8 @@ def analyze(
         header += f"  {boot_col:>5}"
     print(header)
     print("-" * len(header))
-    for rank, (rep, size) in enumerate(reps, 1):
+    for rank, (rep, siblings) in enumerate(reps, 1):
+        size = 1 + len(siblings)
         score = score_of(rep)
         pct = 100 * (rep_scores <= score).sum() / len(rep_scores)
         tier = bucket_for_percentile(pct)
@@ -213,7 +215,7 @@ def analyze(
 
 def write_clustered_report(
     out_dir: Path,
-    reps: list[tuple[dict, int]],
+    reps: list[tuple[dict, list[dict]]],
     rep_scores: np.ndarray,
     total_evaluated: int,
     n_passed_stage1: int,
@@ -223,7 +225,8 @@ def write_clustered_report(
     thumbs.mkdir(parents=True, exist_ok=True)
 
     cards = []
-    for rep, size in reps:
+    for rep, siblings in reps:
+        size = 1 + len(siblings)
         score = score_of(rep)
         pct = 100 * (rep_scores <= score).sum() / len(rep_scores)
         tier = bucket_for_percentile(pct)
@@ -238,6 +241,18 @@ def write_clustered_report(
         elif not (thumbs / f"{code}.png").exists():
             continue
 
+        # Copy any sibling thumbnails we haven't already staged — the expanded
+        # list in the UI shows a small thumb per sibling code.
+        for sib in siblings:
+            sib_src = sib.get("thumbnail_path")
+            sib_code = sib["code_str"]
+            sib_dest = thumbs / f"{sib_code}.png"
+            if sib_src and os.path.exists(sib_src) and not sib_dest.exists():
+                try:
+                    shutil.copyfile(sib_src, sib_dest)
+                except Exception:
+                    pass
+
         cmp_str = f" (cmp ${rep['compare']:02X})" if rep.get("compare") is not None else ""
         boot_html = ""
         boot_class = ""
@@ -246,6 +261,35 @@ def write_clustered_report(
             boot_class = " boot-safe-card" if safe else " boot-unsafe-card"
             boot_html = (f'<div class="boot-{"safe" if safe else "unsafe"}">'
                          f'{"boot: safe" if safe else "boot: UNSAFE"}</div>')
+
+        # Sibling list (collapsed by default via <details>).
+        sib_html = ""
+        if siblings:
+            sib_items = []
+            for sib in siblings:
+                sc = sib["code_str"]
+                sib_cmp = f" (cmp ${sib['compare']:02X})" if sib.get("compare") is not None else ""
+                sib_s2 = sib.get("s2") or {}
+                thumb_exists = (thumbs / f"{sc}.png").exists()
+                img_tag = (f'<img src="thumbs/{html.escape(sc)}.png" '
+                           f'alt="{html.escape(sc)}">' if thumb_exists else
+                           '<div class="sib-noimg">no thumb</div>')
+                sib_items.append(
+                    f'<li class="sib">{img_tag}'
+                    f'<div class="sib-meta">'
+                    f'<span class="sib-code">{html.escape(sc)}</span> '
+                    f'<span class="sib-addr">${sib["cpu_addr"]:04X} := '
+                    f'${sib["value"]:02X}{html.escape(sib_cmp)}</span> '
+                    f'<span class="sib-stats">hist {sib_s2.get("hist_mean", 0):.3f} '
+                    f'&middot; ham {sib_s2.get("hamming_mean", 0):.1f}</span>'
+                    f'</div></li>'
+                )
+            sib_html = (
+                f'<details class="siblings"><summary>'
+                f'{len(siblings)} more in this cluster</summary>'
+                f'<ul>{chr(10).join(sib_items)}</ul></details>'
+            )
+
         cards.append(
             f'<div class="card tier-{tier}{boot_class}">'
             f'<img src="thumbs/{html.escape(code)}.png" alt="{html.escape(code)}">'
@@ -256,6 +300,7 @@ def write_clustered_report(
             f'&middot; hist {s2.get("hist_mean", 0):.3f} '
             f'&middot; ham {s2.get("hamming_mean", 0):.1f}</div>'
             f'{boot_html}'
+            f'{sib_html}'
             f'</div>'
         )
 
@@ -312,6 +357,24 @@ def write_clustered_report(
   .filters .count {{ color: #888; margin-left: auto; font-size: 12px; }}
   body.hide-boot-safe .boot-safe-card {{ display: none; }}
   body.hide-boot-unsafe .boot-unsafe-card {{ display: none; }}
+  .siblings {{ margin-top: 8px; font-size: 11px; color: #aaa; }}
+  .siblings summary {{ cursor: pointer; color: #888; user-select: none;
+                       padding: 4px 0; }}
+  .siblings summary:hover {{ color: #ddd; }}
+  .siblings ul {{ list-style: none; padding: 0; margin: 6px 0 0;
+                  max-height: 420px; overflow-y: auto; }}
+  .siblings .sib {{ display: flex; gap: 8px; align-items: center;
+                    padding: 4px 0; border-top: 1px solid #222; }}
+  .siblings .sib img {{ width: 64px; height: 60px; image-rendering: pixelated;
+                        display: block; }}
+  .siblings .sib-noimg {{ width: 64px; height: 60px; background: #222;
+                          display: flex; align-items: center; justify-content: center;
+                          color: #555; font-size: 10px; }}
+  .siblings .sib-meta {{ display: flex; flex-direction: column; gap: 1px;
+                         min-width: 0; }}
+  .siblings .sib-code {{ color: #ddd; font-weight: bold; }}
+  .siblings .sib-addr {{ color: #888; }}
+  .siblings .sib-stats {{ color: #777; }}
 </style></head><body>
 <h1>Clustered results ({len(reps)} clusters from {n_passed_stage1} survivors / {total_evaluated:,} evaluated)</h1>
 <div class="meta">bins: hist±{HIST_BIN}, ham±{HAM_BIN} &middot; tiers: p95+ top, p75+ promising, rest noise</div>
