@@ -96,6 +96,10 @@ If you want the writeup of *why* the pipeline looks the way it does —
 perceptual hashing, cascaded filtering, differential ablation, and the
 `multiprocessing.Pool` war story — see [docs/BLOG.md](docs/BLOG.md).
 
+For a mechanics-level walkthrough aimed at reimplementing the filter
+chain (exact dHash construction, histogram quantization, threshold
+tuning, cluster binning), see [docs/PIPELINE.md](docs/PIPELINE.md).
+
 ## Subcommands
 
 | command  | what it does                                           |
