@@ -79,18 +79,28 @@ CARD_TEMPLATE = """<div class="card">
 def write_report(
     out_dir: str,
     rom_path: str,
-    baseline_frame: np.ndarray,
+    baseline_frame: np.ndarray | None,
     top: Sequence[CandidateResult],
     total_evaluated: int,
     n_passed_stage1: int,
     top_k: int = 64,
 ) -> str:
-    """Write index.html + thumbs into out_dir. Returns path to index.html."""
+    """Write index.html + thumbs into out_dir. Returns path to index.html.
+
+    If baseline_frame is None, an existing thumbs/baseline.png is reused.
+    """
     out = Path(out_dir)
     thumbs = out / "thumbs"
     thumbs.mkdir(parents=True, exist_ok=True)
 
-    Image.fromarray(baseline_frame).save(thumbs / "baseline.png", optimize=True)
+    baseline_png = thumbs / "baseline.png"
+    if baseline_frame is not None:
+        Image.fromarray(baseline_frame).save(baseline_png, optimize=True)
+    elif not baseline_png.exists():
+        # Fall back to a solid-black placeholder so the page still renders.
+        Image.fromarray(np.zeros((240, 256, 3), dtype="uint8")).save(
+            baseline_png, optimize=True
+        )
 
     cards_html = []
     for r in top[:top_k]:

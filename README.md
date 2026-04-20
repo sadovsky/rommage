@@ -101,8 +101,21 @@ perceptual hashing, cascaded filtering, differential ablation, and the
 | command  | what it does                                           |
 |----------|--------------------------------------------------------|
 | `search` | brute-force over an address range                      |
+| `report` | (re)render `index.html` from existing results          |
 | `decode` | inspect a letter code, e.g. `rommage.py decode SXIOPO` |
 | `encode` | build a letter code from `(addr, value[, compare])`    |
+
+Both `report` and `analyze.py` work on a run that's still in progress —
+they'll read `results.partial.pkl` when `results.pkl` doesn't exist yet,
+so you can preview what's survived so far without waiting or re-running:
+
+```bash
+# Fresh HTML gallery from whatever's on disk so far:
+python3 rommage.py report --out ./results/smb1
+
+# Clustered percentile ranking of stage-2 survivors:
+python3 analyze.py ./results/smb1
+```
 
 ## Project layout
 

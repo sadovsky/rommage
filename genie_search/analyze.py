@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 with contextlib.redirect_stderr(io.StringIO()):
-    from cli import INPUT_SEQUENCES
+    from rommage import INPUT_SEQUENCES
     from genie import GenieCode
     from scorer import _dhash_frame, _quantize, hamming
 
@@ -124,7 +124,18 @@ def analyze(
     warmup_frames: int = 0,
     warmup_seq_name: str = "walk_right",
 ) -> None:
-    with open(results_dir / "results.pkl", "rb") as f:
+    final = results_dir / "results.pkl"
+    partial = results_dir / "results.partial.pkl"
+    if final.exists():
+        src = final
+    elif partial.exists():
+        src = partial
+        print(f"(using partial results from {partial.name} — run still in progress)")
+    else:
+        raise FileNotFoundError(
+            f"no results.pkl or results.partial.pkl found in {results_dir}"
+        )
+    with open(src, "rb") as f:
         all_results = pickle.load(f)
 
     survivors = [r for r in all_results if r.get("passed_stage1") and r.get("s2")]

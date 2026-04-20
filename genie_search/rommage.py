@@ -27,7 +27,7 @@ with contextlib.redirect_stderr(io.StringIO()):
         idle, press_start, walk_right, random_mash,
         NOOP, A, B, SELECT, START, UP, DOWN, LEFT, RIGHT,
     )
-    from search import SearchConfig, run_search, rank_interesting, save_results, format_eta
+    from search import SearchConfig, run_search, rank_interesting, save_results, format_eta, load_partial
     from report import write_report
     from scorer import precompute_baseline
 
@@ -161,6 +161,61 @@ def cmd_search(args):
     print(f"wrote report: {index}")
 
 
+def cmd_report(args):
+    """Regenerate index.html from an existing results pickle.
+
+    Picks results.pkl if present, else results.partial.pkl. Reuses the
+    existing thumbs/baseline.png if present; otherwise --rom is required to
+    re-render it.
+    """
+    out_dir = Path(args.out)
+    final = out_dir / "results.pkl"
+    partial = out_dir / "results.partial.pkl"
+    if final.exists():
+        src = final
+    elif partial.exists():
+        src = partial
+        print(f"using partial results from {partial.name} (run in progress)")
+    else:
+        print(f"no results.pkl or results.partial.pkl in {out_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    results = load_partial(str(src))
+    print(f"loaded {len(results):,} results from {src.name}")
+
+    top = rank_interesting(results)
+    print(f"ranked {len(top)} interesting candidates")
+
+    baseline_mid = None
+    baseline_png = out_dir / "thumbs" / "baseline.png"
+    if args.rom:
+        action_fn = INPUT_SEQUENCES[args.input_sequence]
+        stage2 = action_fn(args.stage2_frames)
+        warmup_seq = args.warmup_input_sequence or args.input_sequence
+        warmup = INPUT_SEQUENCES[warmup_seq](args.warmup_frames) if args.warmup_frames > 0 else None
+        print("rendering fresh baseline frame...", flush=True)
+        from runner import RolloutRunner
+        with RolloutRunner(args.rom, warmup_sequence=warmup) as r:
+            base_frames = r.run(stage2, cheats=[], capture_every=args.capture_every)
+        if base_frames:
+            baseline_mid = base_frames[len(base_frames) // 2]
+    elif not baseline_png.exists():
+        print("(no --rom given and no existing thumbs/baseline.png; "
+              "baseline will be a black placeholder)", flush=True)
+
+    n_passed = sum(1 for r in results if r.passed_stage1)
+    index = write_report(
+        out_dir=str(out_dir),
+        rom_path=args.rom or "(unknown)",
+        baseline_frame=baseline_mid,
+        top=top,
+        total_evaluated=len(results),
+        n_passed_stage1=n_passed,
+        top_k=args.top_k,
+    )
+    print(f"wrote report: {index}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rommage.py", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -238,6 +293,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Flush partial results to disk every N new candidates "
                          "(0 disables incremental saves).")
     sp.set_defaults(func=cmd_search)
+
+    # report
+    sp = sub.add_parser("report",
+                        help="(Re)generate index.html from an existing results pickle "
+                             "(works on partial runs)")
+    sp.add_argument("--out", required=True,
+                    help="results directory (the one passed to `search --out`)")
+    sp.add_argument("--rom", default=None,
+                    help="ROM path — required only if thumbs/baseline.png doesn't exist")
+    sp.add_argument("--input-sequence", default="press_start",
+                    choices=list(INPUT_SEQUENCES.keys()))
+    sp.add_argument("--warmup-input-sequence", default=None,
+                    choices=list(INPUT_SEQUENCES.keys()))
+    sp.add_argument("--warmup-frames", type=int, default=0)
+    sp.add_argument("--stage2-frames", type=int, default=300)
+    sp.add_argument("--capture-every", type=int, default=15)
+    sp.add_argument("--top-k", type=int, default=64)
+    sp.set_defaults(func=cmd_report)
 
     return p
 
