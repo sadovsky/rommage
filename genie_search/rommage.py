@@ -159,6 +159,11 @@ def cmd_search(args):
         top_k=args.top_k,
     )
     print(f"wrote report: {index}")
+    try:
+        from analyze import analyze as cluster_analyze
+        cluster_analyze(out_dir)
+    except Exception as e:
+        print(f"(clustered view skipped: {e})")
 
 
 def cmd_report(args):
@@ -214,6 +219,11 @@ def cmd_report(args):
         top_k=args.top_k,
     )
     print(f"wrote report: {index}")
+    try:
+        from analyze import analyze as cluster_analyze
+        cluster_analyze(out_dir)
+    except Exception as e:
+        print(f"(clustered view skipped: {e})")
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -46,7 +46,7 @@ HTML_TEMPLATE = """<!doctype html>
   .bucket-null {{ color: #666; }}
 </style></head><body>
 <h1>Game Genie search results: {rom_name}</h1>
-<div class="meta">{meta}</div>
+<div class="meta">{meta} &middot; <a href="clustered.html" style="color:#6ce06c">clustered view</a></div>
 <div class="baseline">
   <div>
     <div style="color:#888;font-size:12px">baseline</div>
