@@ -1,13 +1,5 @@
 # rommage
 
-```
- ____   ___  __  __ __  __    _    ____ _____
-|  _ \ / _ \|  \/  |  \/  |  / \  / ___| ____|
-| |_) | | | | |\/| | |\/| | / _ \| |  _|  _|
-|  _ <| |_| | |  | | |  | |/ ___ \ |_| | |___
-|_| \_\___/|_|  |_|_|  |_/_/   \_\____|_____|
-```
-
 > **rom·mage** /ˈrɒm.meɪdʒ/
 > *v.*  to rummage through the guts of an NES ROM, hunting for byte
 > perturbations that break — or improve — the game.
