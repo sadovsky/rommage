@@ -1,0 +1,276 @@
+diff --git a/nes_py/nes/include/cheat.hpp b/nes_py/nes/include/cheat.hpp
+new file mode 100644
+index 0000000..284cbc8
+--- /dev/null
++++ b/nes_py/nes/include/cheat.hpp
+@@ -0,0 +1,79 @@
++//  Program:      nes-py (fork with Game Genie cheat support)
++//  File:         cheat.hpp
++//  Description:  Game Genie / cheat engine for intercepting CPU ROM reads.
++//
++//  Cheats are (address, value, compare) triples. When the CPU reads from
++//  `address` (which must be in $8000-$FFFF for Game Genie semantics), if
++//  `compare` is -1 the read is replaced with `value` unconditionally; if
++//  `compare` is a byte, the read returns `value` only when the underlying
++//  ROM byte at that address equals `compare`.
++//
++//  The table is shared across backup/restore via shared_ptr so that adding
++//  or removing a cheat affects both live and backed-up state simultaneously,
++//  which matches user expectation ("a cheat is a property of the session,
++//  not of the game state").
++
++#ifndef CHEAT_HPP
++#define CHEAT_HPP
++
++#include <cstdint>
++#include <vector>
++#include "common.hpp"
++
++namespace NES {
++
++struct CheatEntry {
++    NES_Address address;  // $8000-$FFFF
++    NES_Byte value;       // replacement byte
++    int16_t compare;      // -1 = no compare (6-letter); else 0..255
++};
++
++/// A flat, linearly-scanned cheat table. Optimized for the common case
++/// where there are zero or a small number of active cheats.
++class CheatTable {
++ public:
++    std::vector<CheatEntry> entries;
++
++    inline bool empty() const { return entries.empty(); }
++    inline void clear() { entries.clear(); }
++
++    /// Add a cheat. Returns the index of the newly added cheat.
++    inline int add(NES_Address address, NES_Byte value, int16_t compare) {
++        entries.push_back({address, value, compare});
++        return static_cast<int>(entries.size() - 1);
++    }
++
++    /// Remove the first cheat matching (address, value, compare). Returns
++    /// true if a cheat was removed.
++    inline bool remove(NES_Address address, NES_Byte value, int16_t compare) {
++        for (auto it = entries.begin(); it != entries.end(); ++it) {
++            if (it->address == address && it->value == value
++                && it->compare == compare) {
++                entries.erase(it);
++                return true;
++            }
++        }
++        return false;
++    }
++
++    /// Look up a cheat for the given address, consulting `original_byte`
++    /// for compare semantics. Returns true and writes into `out_value` if
++    /// a matching cheat fires; else returns false.
++    ///
++    /// Matches first-wins, consistent with real Game Genie hardware.
++    inline bool lookup(NES_Address address, NES_Byte original_byte,
++                       NES_Byte& out_value) const {
++        for (const auto& e : entries) {
++            if (e.address != address) continue;
++            if (e.compare < 0 || e.compare == original_byte) {
++                out_value = e.value;
++                return true;
++            }
++        }
++        return false;
++    }
++};
++
++}  // namespace NES
++
++#endif  // CHEAT_HPP
+diff --git a/nes_py/nes/include/emulator.hpp b/nes_py/nes/include/emulator.hpp
+index ac70a47..d1c4c73 100644
+--- a/nes_py/nes/include/emulator.hpp
++++ b/nes_py/nes/include/emulator.hpp
+@@ -9,8 +9,10 @@
+ #define EMULATOR_HPP
+ 
+ #include <string>
++#include <memory>
+ #include "common.hpp"
+ #include "cartridge.hpp"
++#include "cheat.hpp"
+ #include "controller.hpp"
+ #include "cpu.hpp"
+ #include "ppu.hpp"
+@@ -47,6 +49,9 @@ class Emulator {
+     /// the emulators' PPU
+     PPU backup_ppu;
+ 
++    /// Shared cheat table (single instance across live + backup buses).
++    std::shared_ptr<CheatTable> cheats;
++
+  public:
+     /// The width of the NES screen in pixels
+     static const int WIDTH = SCANLINE_VISIBLE_DOTS;
+@@ -86,12 +91,36 @@ class Emulator {
+     /// Perform a step on the emulator, i.e., a single frame.
+     void step();
+ 
++    /// Add a Game Genie cheat. compare = -1 means "no compare" (6-letter).
++    /// Returns the index of the added cheat.
++    inline int add_cheat(NES_Address addr, NES_Byte value, int16_t compare) {
++        return cheats->add(addr, value, compare);
++    }
++
++    /// Remove the first matching cheat. Returns 1 if removed, 0 otherwise.
++    inline int remove_cheat(NES_Address addr, NES_Byte value, int16_t compare) {
++        return cheats->remove(addr, value, compare) ? 1 : 0;
++    }
++
++    /// Clear all cheats.
++    inline void clear_cheats() { cheats->clear(); }
++
++    /// Number of active cheats.
++    inline int cheat_count() const {
++        return static_cast<int>(cheats->entries.size());
++    }
++
+     /// Create a backup state on the emulator.
+     inline void backup() {
+         backup_bus = bus;
+         backup_picture_bus = picture_bus;
+         backup_cpu = cpu;
+         backup_ppu = ppu;
++        // bus's shared_ptr was copied verbatim; both buses still point at
++        // the same CheatTable instance we own via `cheats`. Reassert to be
++        // defensive against future copy-assignment changes.
++        bus.set_cheat_table(cheats);
++        backup_bus.set_cheat_table(cheats);
+     }
+ 
+     /// Restore the backup state on the emulator.
+@@ -100,6 +129,8 @@ class Emulator {
+         picture_bus = backup_picture_bus;
+         cpu = backup_cpu;
+         ppu = backup_ppu;
++        bus.set_cheat_table(cheats);
++        backup_bus.set_cheat_table(cheats);
+     }
+ };
+ 
+diff --git a/nes_py/nes/include/main_bus.hpp b/nes_py/nes/include/main_bus.hpp
+index dab4061..a7bdb27 100644
+--- a/nes_py/nes/include/main_bus.hpp
++++ b/nes_py/nes/include/main_bus.hpp
+@@ -8,10 +8,12 @@
+ #ifndef MAIN_BUS_HPP
+ #define MAIN_BUS_HPP
+ 
++#include <memory>
+ #include <vector>
+ #include <unordered_map>
+ #include "common.hpp"
+ #include "mapper.hpp"
++#include "cheat.hpp"
+ 
+ namespace NES {
+ 
+@@ -59,10 +61,22 @@ class MainBus {
+     IORegisterToWriteCallbackMap write_callbacks;
+     /// a map of IO registers to callback methods for reads
+     IORegisterToReadCallbackMap read_callbacks;
++    /// Shared cheat table. shared_ptr so that backup/restore preserves
++    /// cheats across state rollbacks.
++    std::shared_ptr<CheatTable> cheats;
+ 
+  public:
+     /// Initialize a new main bus.
+-    MainBus() : ram(0x800, 0), mapper(nullptr) { }
++    MainBus() : ram(0x800, 0), mapper(nullptr),
++                cheats(std::make_shared<CheatTable>()) { }
++
++    /// Install a shared cheat table (used by Emulator so all buses share one).
++    inline void set_cheat_table(std::shared_ptr<CheatTable> table) {
++        cheats = std::move(table);
++    }
++
++    /// Access the cheat table (for Emulator-level control).
++    inline CheatTable* get_cheat_table() { return cheats.get(); }
+ 
+     /// Return a 8-bit pointer to the RAM buffer's first address.
+     ///
+diff --git a/nes_py/nes/src/emulator.cpp b/nes_py/nes/src/emulator.cpp
+index d9655b0..6aa48c9 100644
+--- a/nes_py/nes/src/emulator.cpp
++++ b/nes_py/nes/src/emulator.cpp
+@@ -12,6 +12,11 @@
+ namespace NES {
+ 
+ Emulator::Emulator(std::string rom_path) {
++    // create the shared cheat table and install it on both buses so that
++    // backup/restore preserves cheats across state rollbacks
++    cheats = std::make_shared<CheatTable>();
++    bus.set_cheat_table(cheats);
++    backup_bus.set_cheat_table(cheats);
+     // set the read callbacks
+     bus.set_read_callback(PPUSTATUS, [&](void) { return ppu.get_status();          });
+     bus.set_read_callback(PPUDATA,   [&](void) { return ppu.get_data(picture_bus); });
+diff --git a/nes_py/nes/src/lib_nes_env.cpp b/nes_py/nes/src/lib_nes_env.cpp
+index e2d9dd0..e8f9bf0 100644
+--- a/nes_py/nes/src/lib_nes_env.cpp
++++ b/nes_py/nes/src/lib_nes_env.cpp
+@@ -81,6 +81,39 @@ extern "C" {
+     EXP void Close(NES::Emulator* emu) {
+         delete emu;
+     }
++
++    /// Add a Game Genie cheat. `compare` is -1 to disable compare matching
++    /// (6-letter code semantics), or 0..255 for 8-letter semantics. Returns
++    /// the index of the added cheat (currently informational only).
++    EXP int AddCheat(NES::Emulator* emu, unsigned int addr,
++                     unsigned char value, int compare) {
++        return emu->add_cheat(
++            static_cast<NES::NES_Address>(addr & 0xFFFF),
++            static_cast<NES::NES_Byte>(value),
++            static_cast<int16_t>(compare)
++        );
++    }
++
++    /// Remove the first cheat matching (addr, value, compare). Returns 1 if
++    /// a cheat was removed, 0 otherwise.
++    EXP int RemoveCheat(NES::Emulator* emu, unsigned int addr,
++                        unsigned char value, int compare) {
++        return emu->remove_cheat(
++            static_cast<NES::NES_Address>(addr & 0xFFFF),
++            static_cast<NES::NES_Byte>(value),
++            static_cast<int16_t>(compare)
++        );
++    }
++
++    /// Remove all active cheats.
++    EXP void ClearCheats(NES::Emulator* emu) {
++        emu->clear_cheats();
++    }
++
++    /// Return the number of active cheats.
++    EXP int CheatCount(NES::Emulator* emu) {
++        return emu->cheat_count();
++    }
+ }
+ 
+ // un-define the macro
+diff --git a/nes_py/nes/src/main_bus.cpp b/nes_py/nes/src/main_bus.cpp
+index 4225a8d..0b39e5e 100644
+--- a/nes_py/nes/src/main_bus.cpp
++++ b/nes_py/nes/src/main_bus.cpp
+@@ -36,7 +36,13 @@ NES_Byte MainBus::read(NES_Address address) {
+         if (mapper->hasExtendedRAM())
+             return extended_ram[address - 0x6000];
+     } else {
+-        return mapper->readPRG(address);
++        NES_Byte original = mapper->readPRG(address);
++        if (!cheats->empty()) {
++            NES_Byte patched;
++            if (cheats->lookup(address, original, patched))
++                return patched;
++        }
++        return original;
+     }
+     return 0;
+ }

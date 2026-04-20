@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Claude Code local state
+.claude/
+
+# ROMs (copyrighted, never commit); test_rom.nes is synthetic/built.
+*.nes
+!genie_search/test_rom.nes
+
+# Search outputs
+genie_search/results/
+genie_search/smoke_test_out/
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
