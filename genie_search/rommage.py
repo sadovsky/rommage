@@ -87,6 +87,20 @@ def cmd_search(args):
     warmup_fn = INPUT_SEQUENCES[warmup_seq]
     warmup = warmup_fn(args.warmup_frames) if args.warmup_frames > 0 else None
 
+    # Metadata sidecar so `rommage.py report` / `analyze.py` can run
+    # boot-safety checks without the user re-passing --rom/--warmup flags.
+    import json
+    meta = {
+        "rom_path": os.path.abspath(args.rom),
+        "input_sequence": args.input_sequence,
+        "warmup_input_sequence": warmup_seq,
+        "warmup_frames": args.warmup_frames,
+        "stage1_frames": args.stage1_frames,
+        "stage2_frames": args.stage2_frames,
+        "capture_every": args.capture_every,
+    }
+    (out_dir / "search_meta.json").write_text(json.dumps(meta, indent=2))
+
     cfg = SearchConfig(
         rom_path=args.rom,
         stage1_actions=stage1,

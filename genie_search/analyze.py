@@ -125,12 +125,38 @@ def bucket_for_percentile(p: float) -> str:
     return "noise"
 
 
+def _load_search_meta(results_dir: Path) -> dict:
+    """Load search_meta.json if it exists, else an empty dict. The search
+    command writes this sidecar so analyze.py can rehydrate the ROM path
+    and warmup settings without the user re-typing them."""
+    meta_path = results_dir / "search_meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        import json
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
 def analyze(
     results_dir: Path,
     rom_path: str | None = None,
-    warmup_frames: int = 0,
-    warmup_seq_name: str = "walk_right",
+    warmup_frames: int | None = None,
+    warmup_seq_name: str | None = None,
+    skip_boot_check: bool = False,
 ) -> None:
+    # Autofill missing params from the search-time sidecar so callers
+    # (including `rommage.py search`/`report`) get a boot-safety column
+    # by default without re-plumbing flags.
+    meta = _load_search_meta(results_dir)
+    if rom_path is None:
+        rom_path = meta.get("rom_path")
+    if warmup_frames is None:
+        warmup_frames = int(meta.get("warmup_frames", 0))
+    if warmup_seq_name is None:
+        warmup_seq_name = meta.get("warmup_input_sequence", "walk_right")
+
     final = results_dir / "results.pkl"
     partial = results_dir / "results.partial.pkl"
     if final.exists():
@@ -173,7 +199,9 @@ def analyze(
           f"max={rep_scores.max():.4f}\n")
 
     boot_map: dict[str, bool] = {}
-    if rom_path and warmup_frames > 0:
+    if skip_boot_check:
+        print("(boot-safety check disabled by --no-boot-check)\n")
+    elif rom_path and warmup_frames and warmup_frames > 0 and os.path.exists(rom_path):
         warmup_seq = _get_input_sequences()[warmup_seq_name](warmup_frames)
         print(f"checking boot-safety for {len(reps)} cluster reps "
               f"(warmup: {warmup_seq_name}, {warmup_frames} frames)...")
@@ -181,7 +209,15 @@ def analyze(
         n_safe = sum(boot_map.values())
         print(f"{n_safe}/{len(reps)} cluster reps are boot-safe\n")
     else:
-        print("(skipping boot-safety check: pass --rom and --warmup-frames)\n")
+        if not rom_path:
+            why = "no search_meta.json and --rom not given"
+        elif not os.path.exists(rom_path):
+            why = f"ROM not found at {rom_path}"
+        elif not warmup_frames:
+            why = "warmup_frames=0"
+        else:
+            why = "missing parameters"
+        print(f"(skipping boot-safety check: {why})\n")
 
     # Table
     boot_col = "boot" if boot_map else ""
@@ -424,15 +460,21 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("results_dir", type=Path)
     ap.add_argument("--rom", default=None,
-                    help="ROM path — required for boot-safety check")
-    ap.add_argument("--warmup-frames", type=int, default=0,
-                    help="warmup frame count to replay for boot-safety check")
-    ap.add_argument("--warmup-input-sequence", default="walk_right",
-                    choices=list(_get_input_sequences().keys()))
+                    help="ROM path. Defaults to the value in search_meta.json "
+                         "(written by `rommage.py search`).")
+    ap.add_argument("--warmup-frames", type=int, default=None,
+                    help="Warmup frame count. Defaults to search_meta.json.")
+    ap.add_argument("--warmup-input-sequence", default=None,
+                    choices=list(_get_input_sequences().keys()),
+                    help="Warmup input sequence. Defaults to search_meta.json.")
+    ap.add_argument("--no-boot-check", action="store_true",
+                    help="Skip the per-cluster boot-safety check even if the "
+                         "ROM + warmup are available.")
     args = ap.parse_args()
     analyze(
         args.results_dir,
         rom_path=args.rom,
         warmup_frames=args.warmup_frames,
         warmup_seq_name=args.warmup_input_sequence,
+        skip_boot_check=args.no_boot_check,
     )
