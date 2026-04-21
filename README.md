@@ -146,6 +146,37 @@ rommage/
     └── test_*.py                ← codec, cheat-env, and ROM tests
 ```
 
+## Favourite found codes
+
+A few Game Genie codes for **Super Mario Bros. 1** (NES) that the search
+has turned up and that are weird enough to keep:
+
+| code       | address           | effect                                                           |
+|------------|-------------------|------------------------------------------------------------------|
+| `KAAYPYSA` | `$F701 $85→$84`   | weird audio — STA zp → STY zp in the sound-channel init loop     |
+| `VSZAPEPZ` | `$80A1 $29→$D6`   | dynamic level generation — AND #$E7 → DEC $E7,X in the NMI path  |
+| `AELUNLAL` | `$BBBF $30→$00`   | a hammer falls on you after a block hit — object-timer cap → 0   |
+
+What the disassembly says they're doing:
+
+- **`KAAYPYSA`** — `$F701` sits inside a table-driven sound-channel setup
+  that copies bytes from `$F90C,Y` into zero-page sound pointers
+  (`$F0`, `$F5`, `$F6`, `$F8`, `$F9`). The flip turns `STA $F5` into
+  `STY $F5`, so one pointer byte gets clobbered with the current Y-index
+  instead of the table value. Music and SFX come out scrambled.
+- **`VSZAPEPZ`** — `$80A1` is the `AND #$E7` that masks the PPUMASK shadow
+  (`$0779`) right before `STA $2001` in the NMI prologue. Replacing it
+  with `DEC $E7,X` decrements a different zero-page byte every frame
+  (leaving A stale for the `STA $2001`), which perturbs whatever state
+  lives at `$E7,X` — in practice that corrupts level-generator bookkeeping,
+  and terrain / object spawns keep mutating as you play.
+- **`AELUNLAL`** — `$BBBF` is the `#$30` immediate operand of the
+  `CMP #$30` at `$BBBE`, inside the per-slot timer loop that increments
+  `$2A,X` and, on match, resets it and jumps into a spawn path at
+  `$BBF4`. Lowering the cap to `#$00` makes the compare fire almost
+  immediately after a block bump, so the object path keeps triggering —
+  which in this case materialises as a hammer raining down on Mario.
+
 ## Caveats
 
 - **NROM only** (mapper 0) in v1. Covers SMB1, Donkey Kong, Balloon Fight,
