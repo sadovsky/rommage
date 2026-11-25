@@ -82,10 +82,10 @@ index d1c4c73..aeb9d8c 100644
  
 diff --git a/nes_py/nes/include/tracer.hpp b/nes_py/nes/include/tracer.hpp
 new file mode 100644
-index 0000000..98dad2d
+index 0000000..3c61dc0
 --- /dev/null
 +++ b/nes_py/nes/include/tracer.hpp
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,136 @@
 +//  Program:      nes-py
 +//  File:         tracer.hpp
 +//  Description:  Optional instruction-level CPU tracing.
@@ -135,6 +135,8 @@ index 0000000..98dad2d
 +    bool active = false;
 +    /// record every instruction whose PC is below $8000
 +    bool record_non_rom = false;
++    /// record every instruction regardless of address (unfiltered mode)
++    bool record_all = false;
 +    /// true when at least one PC is watched
 +    bool any_watched = false;
 +    /// one byte per CPU address; non-zero means "record instructions here"
@@ -147,13 +149,18 @@ index 0000000..98dad2d
 +    uint64_t dropped = 0;
 +
 +    /// Recompute the hot-path flag.
-+    inline void refresh() { active = record_non_rom || any_watched; }
++    inline void refresh() { active = record_all || record_non_rom || any_watched; }
 +
 + public:
 +    Tracer() : watched(0x10000, 0) { }
 +
 +    /// Return whether the tracer should be consulted at all.
 +    inline bool is_active() const { return active; }
++
++    /// Record every instruction, subject to the capacity cap. This is the
++    /// unfiltered mode; prefer a filter for long runs, since an NES executes
++    /// roughly 1.8 million instructions per second.
++    inline void set_record_all(bool on) { record_all = on; refresh(); }
 +
 +    /// Enable or disable recording of execution outside PRG ROM.
 +    inline void set_record_non_rom(bool on) { record_non_rom = on; refresh(); }
@@ -201,7 +208,7 @@ index 0000000..98dad2d
 +        uint64_t cycle
 +    ) {
 +        const bool non_rom = pc < 0x8000;
-+        if (!((record_non_rom && non_rom) || watched[pc])) return;
++        if (!(record_all || (record_non_rom && non_rom) || watched[pc])) return;
 +        if (events.size() >= capacity) { dropped++; return; }
 +        TraceEvent e;
 +        e.pc = pc; e.opcode = opcode;
@@ -259,10 +266,10 @@ index 6aa48c9..9813ba1 100644
      backup_bus.set_cheat_table(cheats);
      // set the read callbacks
 diff --git a/nes_py/nes/src/lib_nes_env.cpp b/nes_py/nes/src/lib_nes_env.cpp
-index e8f9bf0..5298acf 100644
+index e8f9bf0..db4827e 100644
 --- a/nes_py/nes/src/lib_nes_env.cpp
 +++ b/nes_py/nes/src/lib_nes_env.cpp
-@@ -114,6 +114,78 @@ extern "C" {
+@@ -114,6 +114,105 @@ extern "C" {
      EXP int CheatCount(NES::Emulator* emu) {
          return emu->cheat_count();
      }
@@ -275,6 +282,33 @@ index e8f9bf0..5298acf 100644
 +    // starting at a given CPU address; TraceRecordNonROM records any
 +    // instruction executed outside PRG ROM, i.e. a derailed program counter.
 +    // ------------------------------------------------------------------
++
++    /// Record every executed instruction (unfiltered), subject to the
++    /// capacity cap. Disabling also clears the buffer, matching the simple
++    /// enable/drain workflow.
++    EXP void EnableTrace(NES::Emulator* emu, int enabled) {
++        NES::Tracer& t = emu->get_tracer();
++        t.set_record_all(enabled != 0);
++        if (!enabled) t.clear();
++    }
++
++    /// Copy a single event by index into `out`. Returns 1 on success, 0 if the
++    /// index is out of range.
++    EXP int TraceEvent(NES::Emulator* emu, int index, unsigned char* out) {
++        NES::Tracer& t = emu->get_tracer();
++        if (index < 0 || static_cast<size_t>(index) >= t.size()) return 0;
++        const NES::TraceEvent& e = t.at(static_cast<size_t>(index));
++        out[0] = e.pc & 0xFF; out[1] = (e.pc >> 8) & 0xFF;
++        out[2] = e.opcode; out[3] = e.a; out[4] = e.x; out[5] = e.y;
++        out[6] = e.sp; out[7] = e.status; out[8] = e.flags;
++        out[9] = out[10] = out[11] = 0;
++        uint64_t cyc = e.cycle;
++        for (int k = 0; k < 4; k++) out[12 + k] = (cyc >> (8 * k)) & 0xFF;
++        return 1;
++    }
++
++    /// Discard all recorded events (alias of TraceClear).
++    EXP void ClearTrace(NES::Emulator* emu) { emu->get_tracer().clear(); }
 +
 +    /// Watch (on != 0) or unwatch a CPU address.
 +    EXP void TraceWatch(NES::Emulator* emu, unsigned int address, int on) {

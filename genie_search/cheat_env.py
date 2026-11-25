@@ -26,10 +26,24 @@ class CheatsNotSupportedError(RuntimeError):
 
 
 class TraceEvent(ctypes.Structure):
+    """One executed instruction, matching the packed 16-byte record the
+    native TraceEvent/TraceGet functions emit. _pack_ = 1 is required: the
+    native side writes a fixed byte layout, so any alignment padding added
+    by ctypes would both misread the fields and under-size the buffer."""
+    _pack_ = 1
     _fields_ = [("pc", ctypes.c_ushort), ("opcode", ctypes.c_ubyte),
                 ("a", ctypes.c_ubyte), ("x", ctypes.c_ubyte),
                 ("y", ctypes.c_ubyte), ("sp", ctypes.c_ubyte),
-                ("status", ctypes.c_ubyte), ("cycles", ctypes.c_int)]
+                ("status", ctypes.c_ubyte),
+                # bit 0 set when the PC was outside PRG ROM (a derailed CPU)
+                ("flags", ctypes.c_ubyte),
+                ("_pad", ctypes.c_ubyte * 3),
+                ("index", ctypes.c_uint)]
+
+    @property
+    def non_rom(self) -> bool:
+        """True when this instruction executed outside PRG ROM."""
+        return bool(self.flags & 0x01)
 
 
 def _install_cheat_signatures() -> bool:
@@ -62,6 +76,7 @@ if TRACE_SUPPORTED:
     _LIB.EnableTrace.argtypes, _LIB.EnableTrace.restype = [ctypes.c_void_p, ctypes.c_int], None
     _LIB.TraceCount.argtypes, _LIB.TraceCount.restype = [ctypes.c_void_p], ctypes.c_int
     _LIB.TraceEvent.argtypes, _LIB.TraceEvent.restype = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(TraceEvent)], ctypes.c_int
+    assert ctypes.sizeof(TraceEvent) == 16, "TraceEvent must match the 16-byte native record"
     _LIB.ClearTrace.argtypes, _LIB.ClearTrace.restype = [ctypes.c_void_p], None
 
 

@@ -5,6 +5,13 @@ nes-py. It is independent of `nes-py-cheats.patch` but is developed on top of
 it; apply the cheats patch first if you want both (the Python wrapper
 `trace_env.py` subclasses `CheatNESEnv`).
 
+> **Note.** Two tracer implementations were written concurrently. They are now
+> unified: this patch is the single implementation, and it keeps the simpler
+> `EnableTrace` / `TraceEvent(index)` / `ClearTrace` entry points from the other
+> one alongside the filtered API below. The duplicate C++ hunks previously
+> folded into `nes-py-cheats.patch` are superseded by this file; apply the
+> cheats patch for cheats and this one for tracing.
+
 It exists for the Game Genie / ACE audit work: the only way to know where the
 6502 program counter actually goes is to look at every instruction, and the
 single most interesting question — *does the PC ever leave PRG ROM?* — cannot
@@ -44,6 +51,9 @@ space. That is the precondition for arbitrary code execution.
 
 | symbol | purpose |
 |---|---|
+| `EnableTrace(emu, on)` | record **every** instruction (unfiltered); off also clears |
+| `TraceEvent(emu, i, out)` | copy one event by index |
+| `ClearTrace(emu)` | discard recorded events |
 | `TraceWatch(emu, addr, on)` | watch / unwatch a CPU address |
 | `TraceClearWatches(emu)` | stop watching everything |
 | `TraceRecordNonROM(emu, on)` | record execution outside PRG ROM |
@@ -91,7 +101,13 @@ Verify the symbols:
 nm -D nes_py/lib_nes_env.cpython-*.so | grep ' T Trace'
 ```
 
-Nine `Trace*` symbols should appear.
+Twelve trace symbols should appear (`EnableTrace`, `ClearTrace`, `TraceEvent`
+and nine `Trace*`).
+
+Unfiltered mode is convenient but expensive: an NES runs roughly 1.8 million
+instructions per second, so `EnableTrace` is for short windows. For long runs
+use `TraceWatch` / `TraceRecordNonROM`, which filter at the source and keep both
+memory and cost bounded.
 
 ## Python usage
 
