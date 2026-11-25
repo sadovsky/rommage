@@ -25,6 +25,13 @@ class CheatsNotSupportedError(RuntimeError):
     """Raised when the installed lib_nes_env.so lacks cheat symbols."""
 
 
+class TraceEvent(ctypes.Structure):
+    _fields_ = [("pc", ctypes.c_ushort), ("opcode", ctypes.c_ubyte),
+                ("a", ctypes.c_ubyte), ("x", ctypes.c_ubyte),
+                ("y", ctypes.c_ubyte), ("sp", ctypes.c_ubyte),
+                ("status", ctypes.c_ubyte), ("cycles", ctypes.c_int)]
+
+
 def _install_cheat_signatures() -> bool:
     """Configure ctypes signatures for the cheat symbols. Returns True if
     all four symbols are present, False otherwise."""
@@ -50,6 +57,12 @@ def _install_cheat_signatures() -> bool:
 
 
 CHEATS_SUPPORTED = _install_cheat_signatures()
+TRACE_SUPPORTED = all(hasattr(_LIB, name) for name in ("EnableTrace", "TraceCount", "TraceEvent", "ClearTrace"))
+if TRACE_SUPPORTED:
+    _LIB.EnableTrace.argtypes, _LIB.EnableTrace.restype = [ctypes.c_void_p, ctypes.c_int], None
+    _LIB.TraceCount.argtypes, _LIB.TraceCount.restype = [ctypes.c_void_p], ctypes.c_int
+    _LIB.TraceEvent.argtypes, _LIB.TraceEvent.restype = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(TraceEvent)], ctypes.c_int
+    _LIB.ClearTrace.argtypes, _LIB.ClearTrace.restype = [ctypes.c_void_p], None
 
 
 CodeLike = Union[str, GenieCode, tuple]
@@ -109,6 +122,21 @@ class CheatNESEnv(_BaseNESEnv):
 
     def clear_cheats(self) -> None:
         _LIB.ClearCheats(self._env)
+
+    def enable_trace(self, enabled: bool = True) -> None:
+        if not TRACE_SUPPORTED:
+            raise CheatsNotSupportedError("Installed emulator lacks native trace symbols.")
+        _LIB.EnableTrace(self._env, int(enabled))
+
+    def drain_trace(self):
+        if not TRACE_SUPPORTED:
+            raise CheatsNotSupportedError("Installed emulator lacks native trace symbols.")
+        count = int(_LIB.TraceCount(self._env))
+        for index in range(count):
+            event = TraceEvent()
+            if _LIB.TraceEvent(self._env, index, ctypes.byref(event)):
+                yield event
+        _LIB.ClearTrace(self._env)
 
     @property
     def cheat_count(self) -> int:
