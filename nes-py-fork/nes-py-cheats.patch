@@ -83,35 +83,110 @@ index 0000000..284cbc8
 +}  // namespace NES
 +
 +#endif  // CHEAT_HPP
+diff --git a/nes_py/nes/include/cpu.hpp b/nes_py/nes/include/cpu.hpp
+index 2721df7..add1cf7 100644
+--- a/nes_py/nes/include/cpu.hpp
++++ b/nes_py/nes/include/cpu.hpp
+@@ -8,12 +8,25 @@
+ #ifndef CPU_HPP
+ #define CPU_HPP
+ 
++#include <functional>
+ #include "common.hpp"
+ #include "cpu_opcodes.hpp"
+ #include "main_bus.hpp"
+ 
+ namespace NES {
+ 
++/// Immutable instruction-boundary state for optional debugger/tracer clients.
++struct CPUTraceEvent {
++    NES_Address pc;
++    NES_Byte opcode;
++    NES_Byte a;
++    NES_Byte x;
++    NES_Byte y;
++    NES_Byte sp;
++    NES_Byte status;
++    int cycles;
++};
++
+ /// The MOS6502 CPU for the Nintendo Entertainment System (NES)
+ class CPU {
+  private:
+@@ -33,6 +46,7 @@ class CPU {
+     int skip_cycles;
+     /// The number of cycles the CPU has run
+     int cycles;
++    std::function<void(const CPUTraceEvent&)> trace_callback;
+ 
+     /// Set the zero and negative flags based on the given value.
+     ///
+@@ -159,6 +173,20 @@ class CPU {
+     ///
+     void cycle(MainBus &bus);
+ 
++    /// Install an instruction-boundary callback. Empty means disabled and
++    /// leaves the execution hot path at one predictable conditional branch.
++    inline void set_trace_callback(std::function<void(const CPUTraceEvent&)> callback) {
++        trace_callback = std::move(callback);
++    }
++
++    inline NES_Address program_counter() const { return register_PC; }
++    inline NES_Byte accumulator() const { return register_A; }
++    inline NES_Byte x_register() const { return register_X; }
++    inline NES_Byte y_register() const { return register_Y; }
++    inline NES_Byte stack_pointer() const { return register_SP; }
++    inline NES_Byte status() const { return flags.byte; }
++    inline int cycle_count() const { return cycles; }
++
+     /// Skip DMA cycles.
+     ///
+     /// 513 = 256 read + 256 write + 1 dummy read
 diff --git a/nes_py/nes/include/emulator.hpp b/nes_py/nes/include/emulator.hpp
-index ac70a47..d1c4c73 100644
+index ac70a47..cd61e1e 100644
 --- a/nes_py/nes/include/emulator.hpp
 +++ b/nes_py/nes/include/emulator.hpp
-@@ -9,8 +9,10 @@
+@@ -9,8 +9,11 @@
  #define EMULATOR_HPP
  
  #include <string>
 +#include <memory>
++#include <vector>
  #include "common.hpp"
  #include "cartridge.hpp"
 +#include "cheat.hpp"
  #include "controller.hpp"
  #include "cpu.hpp"
  #include "ppu.hpp"
-@@ -47,6 +49,9 @@ class Emulator {
+@@ -47,6 +50,10 @@ class Emulator {
      /// the emulators' PPU
      PPU backup_ppu;
  
 +    /// Shared cheat table (single instance across live + backup buses).
 +    std::shared_ptr<CheatTable> cheats;
++    std::vector<CPUTraceEvent> trace_events;
 +
   public:
      /// The width of the NES screen in pixels
      static const int WIDTH = SCANLINE_VISIBLE_DOTS;
-@@ -86,12 +91,36 @@ class Emulator {
+@@ -86,12 +93,50 @@ class Emulator {
      /// Perform a step on the emulator, i.e., a single frame.
      void step();
  
++    inline void set_trace_callback(std::function<void(const CPUTraceEvent&)> callback) {
++        cpu.set_trace_callback(std::move(callback));
++    }
++    inline void enable_trace(bool enabled) {
++        trace_events.clear();
++        cpu.set_trace_callback(enabled ? [this](const CPUTraceEvent& e) { trace_events.push_back(e); }
++                                       : std::function<void(const CPUTraceEvent&)>());
++    }
++    inline int trace_count() const { return static_cast<int>(trace_events.size()); }
++    inline const CPUTraceEvent* trace_event(int index) const {
++        return index >= 0 && index < trace_count() ? &trace_events[index] : nullptr;
++    }
++    inline void clear_trace() { trace_events.clear(); }
++
 +    /// Add a Game Genie cheat. compare = -1 means "no compare" (6-letter).
 +    /// Returns the index of the added cheat.
 +    inline int add_cheat(NES_Address addr, NES_Byte value, int16_t compare) {
@@ -145,7 +220,7 @@ index ac70a47..d1c4c73 100644
      }
  
      /// Restore the backup state on the emulator.
-@@ -100,6 +129,8 @@ class Emulator {
+@@ -100,6 +145,8 @@ class Emulator {
          picture_bus = backup_picture_bus;
          cpu = backup_cpu;
          ppu = backup_ppu;
@@ -195,6 +270,23 @@ index dab4061..a7bdb27 100644
  
      /// Return a 8-bit pointer to the RAM buffer's first address.
      ///
+diff --git a/nes_py/nes/src/cpu.cpp b/nes_py/nes/src/cpu.cpp
+index e0dd483..3951a23 100644
+--- a/nes_py/nes/src/cpu.cpp
++++ b/nes_py/nes/src/cpu.cpp
+@@ -550,7 +550,12 @@ void CPU::cycle(MainBus &bus) {
+     // reset the number of skip cycles to 0
+     skip_cycles = 0;
+     // read the opcode from the bus and lookup the number of cycles
++    const NES_Address pc = register_PC;
+     NES_Byte op = bus.read(register_PC++);
++    if (trace_callback) {
++        trace_callback({pc, op, register_A, register_X, register_Y,
++                        register_SP, flags.byte, cycles});
++    }
+     // Using short-circuit evaluation, call the other function only if the
+     // first failed. ExecuteImplied must be called first and ExecuteBranch
+     // must be before ExecuteType0
 diff --git a/nes_py/nes/src/emulator.cpp b/nes_py/nes/src/emulator.cpp
 index d9655b0..6aa48c9 100644
 --- a/nes_py/nes/src/emulator.cpp
@@ -212,10 +304,18 @@ index d9655b0..6aa48c9 100644
      bus.set_read_callback(PPUSTATUS, [&](void) { return ppu.get_status();          });
      bus.set_read_callback(PPUDATA,   [&](void) { return ppu.get_data(picture_bus); });
 diff --git a/nes_py/nes/src/lib_nes_env.cpp b/nes_py/nes/src/lib_nes_env.cpp
-index e2d9dd0..e8f9bf0 100644
+index e2d9dd0..9e4ed78 100644
 --- a/nes_py/nes/src/lib_nes_env.cpp
 +++ b/nes_py/nes/src/lib_nes_env.cpp
-@@ -81,6 +81,39 @@ extern "C" {
+@@ -23,6 +23,7 @@
+ 
+ // definitions of functions for the Python interface to access
+ extern "C" {
++    struct TraceEventC { unsigned short pc; unsigned char opcode, a, x, y, sp, status; int cycles; };
+     /// Return the width of the NES.
+     EXP int Width() {
+         return NES::Emulator::WIDTH;
+@@ -81,6 +82,50 @@ extern "C" {
      EXP void Close(NES::Emulator* emu) {
          delete emu;
      }
@@ -252,6 +352,17 @@ index e2d9dd0..e8f9bf0 100644
 +    EXP int CheatCount(NES::Emulator* emu) {
 +        return emu->cheat_count();
 +    }
++
++    EXP void EnableTrace(NES::Emulator* emu, int enabled) { emu->enable_trace(enabled != 0); }
++    EXP int TraceCount(NES::Emulator* emu) { return emu->trace_count(); }
++    EXP int TraceEvent(NES::Emulator* emu, int index, TraceEventC* out) {
++        const NES::CPUTraceEvent* event = emu->trace_event(index);
++        if (!event || !out) return 0;
++        *out = {event->pc, event->opcode, event->a, event->x, event->y,
++                event->sp, event->status, event->cycles};
++        return 1;
++    }
++    EXP void ClearTrace(NES::Emulator* emu) { emu->clear_trace(); }
  }
  
  // un-define the macro
