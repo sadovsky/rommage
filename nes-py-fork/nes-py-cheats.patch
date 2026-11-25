@@ -143,37 +143,49 @@ index 2721df7..add1cf7 100644
      ///
      /// 513 = 256 read + 256 write + 1 dummy read
 diff --git a/nes_py/nes/include/emulator.hpp b/nes_py/nes/include/emulator.hpp
-index ac70a47..51035ff 100644
+index ac70a47..cd61e1e 100644
 --- a/nes_py/nes/include/emulator.hpp
 +++ b/nes_py/nes/include/emulator.hpp
-@@ -9,8 +9,10 @@
+@@ -9,8 +9,11 @@
  #define EMULATOR_HPP
  
  #include <string>
 +#include <memory>
++#include <vector>
  #include "common.hpp"
  #include "cartridge.hpp"
 +#include "cheat.hpp"
  #include "controller.hpp"
  #include "cpu.hpp"
  #include "ppu.hpp"
-@@ -47,6 +49,9 @@ class Emulator {
+@@ -47,6 +50,10 @@ class Emulator {
      /// the emulators' PPU
      PPU backup_ppu;
  
 +    /// Shared cheat table (single instance across live + backup buses).
 +    std::shared_ptr<CheatTable> cheats;
++    std::vector<CPUTraceEvent> trace_events;
 +
   public:
      /// The width of the NES screen in pixels
      static const int WIDTH = SCANLINE_VISIBLE_DOTS;
-@@ -86,12 +91,40 @@ class Emulator {
+@@ -86,12 +93,50 @@ class Emulator {
      /// Perform a step on the emulator, i.e., a single frame.
      void step();
  
 +    inline void set_trace_callback(std::function<void(const CPUTraceEvent&)> callback) {
 +        cpu.set_trace_callback(std::move(callback));
 +    }
++    inline void enable_trace(bool enabled) {
++        trace_events.clear();
++        cpu.set_trace_callback(enabled ? [this](const CPUTraceEvent& e) { trace_events.push_back(e); }
++                                       : std::function<void(const CPUTraceEvent&)>());
++    }
++    inline int trace_count() const { return static_cast<int>(trace_events.size()); }
++    inline const CPUTraceEvent* trace_event(int index) const {
++        return index >= 0 && index < trace_count() ? &trace_events[index] : nullptr;
++    }
++    inline void clear_trace() { trace_events.clear(); }
 +
 +    /// Add a Game Genie cheat. compare = -1 means "no compare" (6-letter).
 +    /// Returns the index of the added cheat.
@@ -208,7 +220,7 @@ index ac70a47..51035ff 100644
      }
  
      /// Restore the backup state on the emulator.
-@@ -100,6 +133,8 @@ class Emulator {
+@@ -100,6 +145,8 @@ class Emulator {
          picture_bus = backup_picture_bus;
          cpu = backup_cpu;
          ppu = backup_ppu;
@@ -292,10 +304,18 @@ index d9655b0..6aa48c9 100644
      bus.set_read_callback(PPUSTATUS, [&](void) { return ppu.get_status();          });
      bus.set_read_callback(PPUDATA,   [&](void) { return ppu.get_data(picture_bus); });
 diff --git a/nes_py/nes/src/lib_nes_env.cpp b/nes_py/nes/src/lib_nes_env.cpp
-index e2d9dd0..e8f9bf0 100644
+index e2d9dd0..9e4ed78 100644
 --- a/nes_py/nes/src/lib_nes_env.cpp
 +++ b/nes_py/nes/src/lib_nes_env.cpp
-@@ -81,6 +81,39 @@ extern "C" {
+@@ -23,6 +23,7 @@
+ 
+ // definitions of functions for the Python interface to access
+ extern "C" {
++    struct TraceEventC { unsigned short pc; unsigned char opcode, a, x, y, sp, status; int cycles; };
+     /// Return the width of the NES.
+     EXP int Width() {
+         return NES::Emulator::WIDTH;
+@@ -81,6 +82,50 @@ extern "C" {
      EXP void Close(NES::Emulator* emu) {
          delete emu;
      }
@@ -332,6 +352,17 @@ index e2d9dd0..e8f9bf0 100644
 +    EXP int CheatCount(NES::Emulator* emu) {
 +        return emu->cheat_count();
 +    }
++
++    EXP void EnableTrace(NES::Emulator* emu, int enabled) { emu->enable_trace(enabled != 0); }
++    EXP int TraceCount(NES::Emulator* emu) { return emu->trace_count(); }
++    EXP int TraceEvent(NES::Emulator* emu, int index, TraceEventC* out) {
++        const NES::CPUTraceEvent* event = emu->trace_event(index);
++        if (!event || !out) return 0;
++        *out = {event->pc, event->opcode, event->a, event->x, event->y,
++                event->sp, event->status, event->cycles};
++        return 1;
++    }
++    EXP void ClearTrace(NES::Emulator* emu) { emu->clear_trace(); }
  }
  
  // un-define the macro
