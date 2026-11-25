@@ -14,6 +14,19 @@ void ClearCheats(Emulator*)
 int  CheatCount(Emulator*)
 ```
 
+Instruction tracing adds a bounded-at-consumer C API:
+
+```
+void EnableTrace(Emulator*, int enabled)
+int  TraceCount(Emulator*)
+int  TraceEvent(Emulator*, int index, TraceEventC*)
+void ClearTrace(Emulator*)
+```
+
+`TraceEventC` records the pre-execution PC/opcode, A/X/Y, SP, status, and CPU
+cycle count. Python users can call `CheatNESEnv.enable_trace()` and iterate
+`CheatNESEnv.drain_trace()`.
+
 `compare` is `-1` for 6-letter Game Genie codes (unconditional replace) or
 `0..255` for 8-letter codes (replace only when the original ROM byte matches
 `compare`). `addr` should be the full CPU address in `$8000..$FFFF`.
