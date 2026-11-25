@@ -1,90 +1,64 @@
-diff --git a/nes_py/nes/include/cheat.hpp b/nes_py/nes/include/cheat.hpp
-new file mode 100644
-index 0000000..284cbc8
---- /dev/null
-+++ b/nes_py/nes/include/cheat.hpp
-@@ -0,0 +1,79 @@
-+//  Program:      nes-py (fork with Game Genie cheat support)
-+//  File:         cheat.hpp
-+//  Description:  Game Genie / cheat engine for intercepting CPU ROM reads.
-+//
-+//  Cheats are (address, value, compare) triples. When the CPU reads from
-+//  `address` (which must be in $8000-$FFFF for Game Genie semantics), if
-+//  `compare` is -1 the read is replaced with `value` unconditionally; if
-+//  `compare` is a byte, the read returns `value` only when the underlying
-+//  ROM byte at that address equals `compare`.
-+//
-+//  The table is shared across backup/restore via shared_ptr so that adding
-+//  or removing a cheat affects both live and backed-up state simultaneously,
-+//  which matches user expectation ("a cheat is a property of the session,
-+//  not of the game state").
-+
-+#ifndef CHEAT_HPP
-+#define CHEAT_HPP
-+
-+#include <cstdint>
-+#include <vector>
-+#include "common.hpp"
-+
-+namespace NES {
-+
-+struct CheatEntry {
-+    NES_Address address;  // $8000-$FFFF
-+    NES_Byte value;       // replacement byte
-+    int16_t compare;      // -1 = no compare (6-letter); else 0..255
+diff --git a/nes_py/nes/include/cpu.hpp b/nes_py/nes/include/cpu.hpp
+index 2721df7..add1cf7 100644
+--- a/nes_py/nes/include/cpu.hpp
++++ b/nes_py/nes/include/cpu.hpp
+@@ -8,12 +8,25 @@
+ #ifndef CPU_HPP
+ #define CPU_HPP
+ 
++#include <functional>
+ #include "common.hpp"
+ #include "cpu_opcodes.hpp"
+ #include "main_bus.hpp"
+ 
+ namespace NES {
+ 
++/// Immutable instruction-boundary state for optional debugger/tracer clients.
++struct CPUTraceEvent {
++    NES_Address pc;
++    NES_Byte opcode;
++    NES_Byte a;
++    NES_Byte x;
++    NES_Byte y;
++    NES_Byte sp;
++    NES_Byte status;
++    int cycles;
 +};
 +
-+/// A flat, linearly-scanned cheat table. Optimized for the common case
-+/// where there are zero or a small number of active cheats.
-+class CheatTable {
-+ public:
-+    std::vector<CheatEntry> entries;
-+
-+    inline bool empty() const { return entries.empty(); }
-+    inline void clear() { entries.clear(); }
-+
-+    /// Add a cheat. Returns the index of the newly added cheat.
-+    inline int add(NES_Address address, NES_Byte value, int16_t compare) {
-+        entries.push_back({address, value, compare});
-+        return static_cast<int>(entries.size() - 1);
+ /// The MOS6502 CPU for the Nintendo Entertainment System (NES)
+ class CPU {
+  private:
+@@ -33,6 +46,7 @@ class CPU {
+     int skip_cycles;
+     /// The number of cycles the CPU has run
+     int cycles;
++    std::function<void(const CPUTraceEvent&)> trace_callback;
+ 
+     /// Set the zero and negative flags based on the given value.
+     ///
+@@ -159,6 +173,20 @@ class CPU {
+     ///
+     void cycle(MainBus &bus);
+ 
++    /// Install an instruction-boundary callback. Empty means disabled and
++    /// leaves the execution hot path at one predictable conditional branch.
++    inline void set_trace_callback(std::function<void(const CPUTraceEvent&)> callback) {
++        trace_callback = std::move(callback);
 +    }
 +
-+    /// Remove the first cheat matching (address, value, compare). Returns
-+    /// true if a cheat was removed.
-+    inline bool remove(NES_Address address, NES_Byte value, int16_t compare) {
-+        for (auto it = entries.begin(); it != entries.end(); ++it) {
-+            if (it->address == address && it->value == value
-+                && it->compare == compare) {
-+                entries.erase(it);
-+                return true;
-+            }
-+        }
-+        return false;
-+    }
++    inline NES_Address program_counter() const { return register_PC; }
++    inline NES_Byte accumulator() const { return register_A; }
++    inline NES_Byte x_register() const { return register_X; }
++    inline NES_Byte y_register() const { return register_Y; }
++    inline NES_Byte stack_pointer() const { return register_SP; }
++    inline NES_Byte status() const { return flags.byte; }
++    inline int cycle_count() const { return cycles; }
 +
-+    /// Look up a cheat for the given address, consulting `original_byte`
-+    /// for compare semantics. Returns true and writes into `out_value` if
-+    /// a matching cheat fires; else returns false.
-+    ///
-+    /// Matches first-wins, consistent with real Game Genie hardware.
-+    inline bool lookup(NES_Address address, NES_Byte original_byte,
-+                       NES_Byte& out_value) const {
-+        for (const auto& e : entries) {
-+            if (e.address != address) continue;
-+            if (e.compare < 0 || e.compare == original_byte) {
-+                out_value = e.value;
-+                return true;
-+            }
-+        }
-+        return false;
-+    }
-+};
-+
-+}  // namespace NES
-+
-+#endif  // CHEAT_HPP
+     /// Skip DMA cycles.
+     ///
+     /// 513 = 256 read + 256 write + 1 dummy read
 diff --git a/nes_py/nes/include/emulator.hpp b/nes_py/nes/include/emulator.hpp
-index ac70a47..d1c4c73 100644
+index ac70a47..51035ff 100644
 --- a/nes_py/nes/include/emulator.hpp
 +++ b/nes_py/nes/include/emulator.hpp
 @@ -9,8 +9,10 @@
@@ -108,10 +82,14 @@ index ac70a47..d1c4c73 100644
   public:
      /// The width of the NES screen in pixels
      static const int WIDTH = SCANLINE_VISIBLE_DOTS;
-@@ -86,12 +91,36 @@ class Emulator {
+@@ -86,12 +91,40 @@ class Emulator {
      /// Perform a step on the emulator, i.e., a single frame.
      void step();
  
++    inline void set_trace_callback(std::function<void(const CPUTraceEvent&)> callback) {
++        cpu.set_trace_callback(std::move(callback));
++    }
++
 +    /// Add a Game Genie cheat. compare = -1 means "no compare" (6-letter).
 +    /// Returns the index of the added cheat.
 +    inline int add_cheat(NES_Address addr, NES_Byte value, int16_t compare) {
@@ -145,7 +123,7 @@ index ac70a47..d1c4c73 100644
      }
  
      /// Restore the backup state on the emulator.
-@@ -100,6 +129,8 @@ class Emulator {
+@@ -100,6 +133,8 @@ class Emulator {
          picture_bus = backup_picture_bus;
          cpu = backup_cpu;
          ppu = backup_ppu;
@@ -195,6 +173,23 @@ index dab4061..a7bdb27 100644
  
      /// Return a 8-bit pointer to the RAM buffer's first address.
      ///
+diff --git a/nes_py/nes/src/cpu.cpp b/nes_py/nes/src/cpu.cpp
+index e0dd483..3951a23 100644
+--- a/nes_py/nes/src/cpu.cpp
++++ b/nes_py/nes/src/cpu.cpp
+@@ -550,7 +550,12 @@ void CPU::cycle(MainBus &bus) {
+     // reset the number of skip cycles to 0
+     skip_cycles = 0;
+     // read the opcode from the bus and lookup the number of cycles
++    const NES_Address pc = register_PC;
+     NES_Byte op = bus.read(register_PC++);
++    if (trace_callback) {
++        trace_callback({pc, op, register_A, register_X, register_Y,
++                        register_SP, flags.byte, cycles});
++    }
+     // Using short-circuit evaluation, call the other function only if the
+     // first failed. ExecuteImplied must be called first and ExecuteBranch
+     // must be before ExecuteType0
 diff --git a/nes_py/nes/src/emulator.cpp b/nes_py/nes/src/emulator.cpp
 index d9655b0..6aa48c9 100644
 --- a/nes_py/nes/src/emulator.cpp
