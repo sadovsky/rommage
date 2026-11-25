@@ -1,0 +1,343 @@
+diff --git a/nes_py/nes/include/cpu.hpp b/nes_py/nes/include/cpu.hpp
+index 2721df7..6d5857e 100644
+--- a/nes_py/nes/include/cpu.hpp
++++ b/nes_py/nes/include/cpu.hpp
+@@ -11,6 +11,7 @@
+ #include "common.hpp"
+ #include "cpu_opcodes.hpp"
+ #include "main_bus.hpp"
++#include "tracer.hpp"
+ 
+ namespace NES {
+ 
+@@ -33,6 +34,10 @@ class CPU {
+     int skip_cycles;
+     /// The number of cycles the CPU has run
+     int cycles;
++    /// Optional instruction tracer; nullptr (the default) disables tracing
++    Tracer* tracer = nullptr;
++    /// Monotonic count of executed instructions, used as the trace timestamp
++    uint64_t instruction_count = 0;
+ 
+     /// Set the zero and negative flags based on the given value.
+     ///
+@@ -159,6 +164,15 @@ class CPU {
+     ///
+     void cycle(MainBus &bus);
+ 
++    /// Attach (or detach, with nullptr) an instruction tracer.
++    ///
++    /// @param t the tracer to report executed instructions to
++    ///
++    inline void set_tracer(Tracer* t) { tracer = t; }
++
++    /// Return the number of instructions executed since reset.
++    inline uint64_t get_instruction_count() const { return instruction_count; }
++
+     /// Skip DMA cycles.
+     ///
+     /// 513 = 256 read + 256 write + 1 dummy read
+diff --git a/nes_py/nes/include/emulator.hpp b/nes_py/nes/include/emulator.hpp
+index d1c4c73..aeb9d8c 100644
+--- a/nes_py/nes/include/emulator.hpp
++++ b/nes_py/nes/include/emulator.hpp
+@@ -49,10 +49,18 @@ class Emulator {
+     /// the emulators' PPU
+     PPU backup_ppu;
+ 
++    /// Optional instruction tracer, owned by the emulator and attached to the
++    /// live CPU. Backup/restore must not detach it, so the CPU pointer is
++    /// re-attached after every restore.
++    Tracer tracer;
++
+     /// Shared cheat table (single instance across live + backup buses).
+     std::shared_ptr<CheatTable> cheats;
+ 
+  public:
++    /// Return the emulator's instruction tracer.
++    inline Tracer& get_tracer() { return tracer; }
++
+     /// The width of the NES screen in pixels
+     static const int WIDTH = SCANLINE_VISIBLE_DOTS;
+     /// The height of the NES screen in pixels
+@@ -121,6 +129,10 @@ class Emulator {
+         // defensive against future copy-assignment changes.
+         bus.set_cheat_table(cheats);
+         backup_bus.set_cheat_table(cheats);
++        // the Tracer lives in this Emulator, so its address is stable; the
++        // CPU copy above may carry a stale pointer, so reassert it
++        cpu.set_tracer(&tracer);
++        backup_cpu.set_tracer(&tracer);
+     }
+ 
+     /// Restore the backup state on the emulator.
+@@ -131,6 +143,8 @@ class Emulator {
+         ppu = backup_ppu;
+         bus.set_cheat_table(cheats);
+         backup_bus.set_cheat_table(cheats);
++        cpu.set_tracer(&tracer);
++        backup_cpu.set_tracer(&tracer);
+     }
+ };
+ 
+diff --git a/nes_py/nes/include/tracer.hpp b/nes_py/nes/include/tracer.hpp
+new file mode 100644
+index 0000000..98dad2d
+--- /dev/null
++++ b/nes_py/nes/include/tracer.hpp
+@@ -0,0 +1,129 @@
++//  Program:      nes-py
++//  File:         tracer.hpp
++//  Description:  Optional instruction-level CPU tracing.
++//
++//  Records one record per executed instruction, filtered so that the common
++//  case costs a single predictable branch. Two independent filters:
++//
++//    * a 64 KiB PC bitmap   - record when the instruction starts at a watched
++//                             address (e.g. $8E04 entry, $8E16 dispatch)
++//    * record_non_rom       - record whenever the program counter leaves PRG
++//                             ROM ($0000-$7FFF), which is the signal that
++//                             execution has derailed into RAM or I/O space
++//
++//  When tracing is disabled the hook is one boolean test, so an untraced run
++//  behaves exactly as before.
++//
++
++#ifndef TRACER_HPP
++#define TRACER_HPP
++
++#include <cstdint>
++#include <vector>
++#include "common.hpp"
++
++namespace NES {
++
++/// One executed instruction.
++struct TraceEvent {
++    uint16_t pc;        ///< address the instruction was fetched from
++    uint8_t  opcode;    ///< the opcode byte
++    uint8_t  a;         ///< accumulator before execution
++    uint8_t  x;         ///< X before execution
++    uint8_t  y;         ///< Y before execution
++    uint8_t  sp;        ///< stack pointer before execution
++    uint8_t  status;    ///< flags byte before execution
++    uint8_t  flags;     ///< bit 0: PC was outside PRG ROM
++    uint64_t cycle;     ///< CPU cycle count at the fetch
++};
++
++/// Bit set in TraceEvent::flags when the instruction executed outside PRG ROM.
++static const uint8_t TRACE_FLAG_NON_ROM = 0x01;
++
++/// Instruction-level trace buffer with PC filtering.
++class Tracer {
++ private:
++    /// whether any recording is active (the single hot-path test)
++    bool active = false;
++    /// record every instruction whose PC is below $8000
++    bool record_non_rom = false;
++    /// true when at least one PC is watched
++    bool any_watched = false;
++    /// one byte per CPU address; non-zero means "record instructions here"
++    std::vector<uint8_t> watched;
++    /// recorded events, capped at capacity
++    std::vector<TraceEvent> events;
++    /// maximum number of events to retain
++    size_t capacity = 65536;
++    /// number of events dropped because the buffer was full
++    uint64_t dropped = 0;
++
++    /// Recompute the hot-path flag.
++    inline void refresh() { active = record_non_rom || any_watched; }
++
++ public:
++    Tracer() : watched(0x10000, 0) { }
++
++    /// Return whether the tracer should be consulted at all.
++    inline bool is_active() const { return active; }
++
++    /// Enable or disable recording of execution outside PRG ROM.
++    inline void set_record_non_rom(bool on) { record_non_rom = on; refresh(); }
++
++    /// Start or stop watching a single CPU address.
++    inline void set_watch(NES_Address address, bool on) {
++        watched[address & 0xFFFF] = on ? 1 : 0;
++        if (on) {
++            any_watched = true;
++        } else {
++            any_watched = false;
++            for (size_t i = 0; i < watched.size(); i++)
++                if (watched[i]) { any_watched = true; break; }
++        }
++        refresh();
++    }
++
++    /// Stop watching every address.
++    inline void clear_watches() {
++        std::fill(watched.begin(), watched.end(), 0);
++        any_watched = false;
++        refresh();
++    }
++
++    /// Set the maximum number of retained events.
++    inline void set_capacity(size_t n) { capacity = n; }
++
++    /// Discard recorded events and the dropped counter.
++    inline void clear() { events.clear(); dropped = 0; }
++
++    /// The number of recorded events.
++    inline size_t size() const { return events.size(); }
++
++    /// The number of events discarded because the buffer was full.
++    inline uint64_t num_dropped() const { return dropped; }
++
++    /// Access a recorded event.
++    inline const TraceEvent& at(size_t i) const { return events[i]; }
++
++    /// Record an instruction if it passes the filters. Called from CPU::cycle
++    /// only when is_active() is true.
++    inline void on_instruction(
++        NES_Address pc, NES_Byte opcode,
++        NES_Byte a, NES_Byte x, NES_Byte y, NES_Byte sp, NES_Byte status,
++        uint64_t cycle
++    ) {
++        const bool non_rom = pc < 0x8000;
++        if (!((record_non_rom && non_rom) || watched[pc])) return;
++        if (events.size() >= capacity) { dropped++; return; }
++        TraceEvent e;
++        e.pc = pc; e.opcode = opcode;
++        e.a = a; e.x = x; e.y = y; e.sp = sp; e.status = status;
++        e.flags = non_rom ? TRACE_FLAG_NON_ROM : 0;
++        e.cycle = cycle;
++        events.push_back(e);
++    }
++};
++
++}  // namespace NES
++
++#endif  // TRACER_HPP
+diff --git a/nes_py/nes/src/cpu.cpp b/nes_py/nes/src/cpu.cpp
+index e0dd483..7d73db8 100644
+--- a/nes_py/nes/src/cpu.cpp
++++ b/nes_py/nes/src/cpu.cpp
+@@ -498,6 +498,7 @@ bool CPU::type2(MainBus &bus, NES_Byte opcode) {
+ }
+ 
+ void CPU::reset(NES_Address start_address) {
++    instruction_count = 0;
+     skip_cycles = 0;
+     cycles = 0;
+     register_A = 0;
+@@ -550,7 +551,16 @@ void CPU::cycle(MainBus &bus) {
+     // reset the number of skip cycles to 0
+     skip_cycles = 0;
+     // read the opcode from the bus and lookup the number of cycles
++    const NES_Address trace_pc = register_PC;
+     NES_Byte op = bus.read(register_PC++);
++    ++instruction_count;
++    // Optional instruction-level trace. When no tracer is attached, or the
++    // tracer has no active filter, this costs one predictable branch.
++    if (tracer != nullptr && tracer->is_active())
++        tracer->on_instruction(
++            trace_pc, op,
++            register_A, register_X, register_Y, register_SP, flags.byte,
++            instruction_count);
+     // Using short-circuit evaluation, call the other function only if the
+     // first failed. ExecuteImplied must be called first and ExecuteBranch
+     // must be before ExecuteType0
+diff --git a/nes_py/nes/src/emulator.cpp b/nes_py/nes/src/emulator.cpp
+index 6aa48c9..9813ba1 100644
+--- a/nes_py/nes/src/emulator.cpp
++++ b/nes_py/nes/src/emulator.cpp
+@@ -15,6 +15,9 @@ Emulator::Emulator(std::string rom_path) {
+     // create the shared cheat table and install it on both buses so that
+     // backup/restore preserves cheats across state rollbacks
+     cheats = std::make_shared<CheatTable>();
++    // attach the instruction tracer; inactive until a filter is set
++    cpu.set_tracer(&tracer);
++    backup_cpu.set_tracer(&tracer);
+     bus.set_cheat_table(cheats);
+     backup_bus.set_cheat_table(cheats);
+     // set the read callbacks
+diff --git a/nes_py/nes/src/lib_nes_env.cpp b/nes_py/nes/src/lib_nes_env.cpp
+index e8f9bf0..5298acf 100644
+--- a/nes_py/nes/src/lib_nes_env.cpp
++++ b/nes_py/nes/src/lib_nes_env.cpp
+@@ -114,6 +114,78 @@ extern "C" {
+     EXP int CheatCount(NES::Emulator* emu) {
+         return emu->cheat_count();
+     }
++
++    // ------------------------------------------------------------------
++    // Instruction-level tracing
++    //
++    // Tracing is inactive until a filter is set, and costs one predictable
++    // branch per instruction when inactive. TraceWatch records instructions
++    // starting at a given CPU address; TraceRecordNonROM records any
++    // instruction executed outside PRG ROM, i.e. a derailed program counter.
++    // ------------------------------------------------------------------
++
++    /// Watch (on != 0) or unwatch a CPU address.
++    EXP void TraceWatch(NES::Emulator* emu, unsigned int address, int on) {
++        emu->get_tracer().set_watch(
++            static_cast<NES::NES_Address>(address & 0xFFFF), on != 0);
++    }
++
++    /// Stop watching every address.
++    EXP void TraceClearWatches(NES::Emulator* emu) {
++        emu->get_tracer().clear_watches();
++    }
++
++    /// Record every instruction whose program counter is below $8000.
++    EXP void TraceRecordNonROM(NES::Emulator* emu, int on) {
++        emu->get_tracer().set_record_non_rom(on != 0);
++    }
++
++    /// Set the maximum number of retained events.
++    EXP void TraceSetCapacity(NES::Emulator* emu, unsigned int n) {
++        emu->get_tracer().set_capacity(static_cast<size_t>(n));
++    }
++
++    /// Discard all recorded events.
++    EXP void TraceClear(NES::Emulator* emu) {
++        emu->get_tracer().clear();
++    }
++
++    /// Return the number of recorded events.
++    EXP unsigned int TraceCount(NES::Emulator* emu) {
++        return static_cast<unsigned int>(emu->get_tracer().size());
++    }
++
++    /// Return the number of events dropped because the buffer was full.
++    EXP unsigned long long TraceDropped(NES::Emulator* emu) {
++        return emu->get_tracer().num_dropped();
++    }
++
++    /// Return whether any trace filter is active.
++    EXP int TraceActive(NES::Emulator* emu) {
++        return emu->get_tracer().is_active() ? 1 : 0;
++    }
++
++    /// Copy up to `max_events` events into `out` as packed 16-byte records:
++    ///   u16 pc, u8 opcode, u8 a, u8 x, u8 y, u8 sp, u8 status, u8 flags,
++    ///   u64 instruction_index
++    /// Returns the number of events written.
++    EXP unsigned int TraceGet(NES::Emulator* emu, unsigned char* out,
++                              unsigned int max_events) {
++        NES::Tracer& t = emu->get_tracer();
++        unsigned int n = static_cast<unsigned int>(t.size());
++        if (n > max_events) n = max_events;
++        for (unsigned int i = 0; i < n; i++) {
++            const NES::TraceEvent& e = t.at(i);
++            unsigned char* p = out + i * 16;
++            p[0] = e.pc & 0xFF; p[1] = (e.pc >> 8) & 0xFF;
++            p[2] = e.opcode; p[3] = e.a; p[4] = e.x; p[5] = e.y;
++            p[6] = e.sp; p[7] = e.status; p[8] = e.flags;
++            p[9] = p[10] = p[11] = 0;
++            uint64_t c = e.cycle;
++            for (int k = 0; k < 4; k++) p[12 + k] = (c >> (8 * k)) & 0xFF;
++        }
++        return n;
++    }
+ }
+ 
+ // un-define the macro

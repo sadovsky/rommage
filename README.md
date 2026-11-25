@@ -188,6 +188,36 @@ What the disassembly says they're doing:
   3000+ NES frames/sec through nes-py; virtualised sandboxes can drop an
   order of magnitude. Run the bundled speed test first.
 
+## Instruction-level CPU tracing
+
+`nes-py-fork/nes-py-tracer.patch` adds an optional instruction tracer to the
+emulator, used by the [SMB1 ACE audit](https://github.com/sadovsky/smb1-ace-audit)
+to answer a question frame-sampling cannot: *does the 6502 program counter ever
+leave PRG ROM?* On NROM all code is in ROM, so an instruction executing below
+`$8000` means execution has derailed into RAM or I/O - the precondition for
+arbitrary code execution.
+
+Two filters, both off by default (an untraced run costs one predictable branch
+per instruction and behaves identically):
+
+```python
+from trace_env import TraceNESEnv
+
+env = TraceNESEnv("smb1.nes")
+env.reset()
+env.watch(0x8E04)          # SMB1's jump engine; A holds the dispatch index
+env.record_non_rom(True)   # catch a derailed program counter
+
+for _ in range(600):
+    env.step(0)
+
+for e in env.iter_non_rom():
+    print("PC left ROM:", e.as_dict())
+```
+
+Build and API details in `nes-py-fork/nes-py-tracer.README.md`; tests in
+`genie_search/test_trace_env.py`.
+
 ## Attribution
 
 Built on top of [nes-py](https://github.com/Kautenja/nes-py) with a small
